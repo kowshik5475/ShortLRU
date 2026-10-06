@@ -1385,3 +1385,67 @@ However, a dataset makes the project more realistic because it allows us to:
 
 The benchmark is therefore an experiment around the data structures rather
 than an artificial requirement for the application itself.
+
+
+## Benchmark reports and visualization
+
+For a portfolio project, benchmark results are more useful when they can be
+saved and visualized.
+
+Save benchmark results as CSV:
+
+```bash
+python benchmark.py --output results/benchmark.csv
+```
+
+Install the optional reporting dependency:
+
+```bash
+python -m pip install -e ".[report]"
+```
+
+Then generate charts:
+
+```bash
+python report.py
+```
+
+This creates:
+
+```text
+results/
+├── benchmark.csv
+├── cache_capacity_vs_hit_rate.png
+└── cache_capacity_vs_evictions.png
+```
+
+### What the charts mean
+
+**Cache capacity vs hit rate**
+
+A larger cache can retain more recently used URLs. When the workload has
+temporal locality, this generally increases the chance that a requested URL
+is already cached.
+
+**Cache capacity vs evictions**
+
+A larger cache generally needs to evict entries less frequently because more
+entries can remain resident at the same time.
+
+These graphs make the relationship between the LRU algorithm and measurable
+system behavior easier to explain during a project presentation.
+
+### Recommended experiment
+
+Run:
+
+```bash
+python benchmark.py --capacities 3 5 10 20 30 40 --operations 10000 --output results/benchmark.csv
+python report.py
+```
+
+Then include the generated charts in your project report or presentation.
+
+The benchmark uses a fixed random seed by default, making the workload
+reproducible. Change `--seed` if you want to experiment with a different
+access pattern.

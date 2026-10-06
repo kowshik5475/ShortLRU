@@ -1,0 +1,6 @@
+
+[report]
+matplotlib>=3.7
+
+[test]
+pytest>=7.0
