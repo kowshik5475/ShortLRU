@@ -103,15 +103,29 @@ ShortLRU/
 ├── shortlru/
 │   ├── __init__.py
 │   ├── cache.py
+│   ├── admission.py
+│   ├── workloads.py
 │   ├── store.py
 │   ├── shortener.py
+│   ├── dataset.py
 │   └── cli.py
 ├── tests/
 │   ├── test_cache.py
-│   └── test_shortener.py
+│   ├── test_shortener.py
+│   ├── test_dataset.py
+│   ├── test_benchmark.py
+│   ├── test_workloads.py
+│   ├── test_admission.py
+│   ├── test_benchmark_experiment.py
+│   └── test_report.py
+├── data/
+├── results/
+├── benchmark.py
+├── report.py
 ├── demo.py
 ├── pyproject.toml
 ├── README.md
+├── ENGINEERING_REPORT.md
 └── .gitignore
 ```
 
@@ -1449,3 +1463,68 @@ Then include the generated charts in your project report or presentation.
 The benchmark uses a fixed random seed by default, making the workload
 reproducible. Change `--seed` if you want to experiment with a different
 access pattern.
+
+
+## Experimental extension: scan-resistant cache admission
+
+ShortLRU includes an experimental second-access admission policy alongside ordinary LRU. The existing `LRUCache` implementation and default `URLShortener` behavior remain unchanged.
+
+### Policy
+
+`SecondAccessAdmission` records a cache-miss observation and admits a known URL on a subsequent cache miss if it occurs within a configurable request-count window. The observation at sequence `s` remains eligible through `s + window_size` (inclusive). Every cache access advances the global request sequence, including cache hits and misses for unknown codes. Wall-clock time is not used. A FIFO queue expires stale observations so tracking retains at most `window_size + 1` live request-sequence observations rather than every URL ever seen.
+
+The `CacheAsideResolver` supplies an isolated cache-aside integration. Passing no admission policy gives ordinary LRU; passing `SecondAccessAdmission(window_size=20)` enables the experimental policy. Admission affects only cache population, not URL-store mappings.
+
+### Synthetic workloads
+
+- **Zipf:** skewed popularity across a configurable URL pool.
+- **Hot scan:** repeated requests to a hot set, a scan of unique URLs, and a second hot phase.
+- **Popularity shift:** Zipf-like requests transition from hot set A to disjoint hot set B.
+
+Each workload uses a private seeded random generator. The same seed and parameters produce the same trace. These are synthetic workload models, not production traffic. Hot-scan traces are parameterized by cache capacity, so traces differ across capacities; both strategies always receive the exact same trace within a configuration.
+
+### Install, test, and reproduce
+
+```bash
+python -m pip install -e ".[test,report]"
+python -m pytest
+python benchmark.py
+python benchmark.py --workloads zipf hot_scan popularity_shift \
+  --capacities 4 8 16 32 --seeds 42 7 2026 --repetitions 5 \
+  --window-size 20 --requests 4000 \
+  --output results/admission_benchmark.csv --overwrite
+python report.py --input results/admission_benchmark.csv --output-dir results
+```
+
+The legacy `python benchmark.py` command and its original CSV schema remain supported. Experimental output includes overall and per-phase rows. It records hits, misses, hit rate, evictions, explicit backing-store lookups, admissions, first-observation bypasses, elapsed time, strategy, seed, trial, workload and capacity. The report script auto-detects the schema and preserves the original legacy charts.
+
+### Measured findings from this release
+
+The included `results/admission_benchmark.csv` was generated with three workloads, capacities 4/8/16/32, seeds 42/7/2026, five repetitions per seed/capacity/strategy, a 20-request admission window, and 4,000 requested operations (hot-scan and popularity-shift split requests across phases). The table below reports median hit rates across the 15 trials per workload/capacity/strategy.
+
+| Workload | Capacity | Ordinary LRU | Second-access | Interpretation |
+|---|---:|---:|---:|---|
+| Zipf | 4 | 37.52% | 47.05% | Admission policy improves hit rate under scarce capacity |
+| Zipf | 8 | 54.95% | 63.35% | Admission policy improves hit rate |
+| Zipf | 32 | 86.17% | 86.62% | Small improvement when capacity is larger |
+| Hot scan, post-scan phase | 8 | 99.60% | 100.00% | Admission policy preserves the hot set in this trace |
+| Hot scan, post-scan phase | 16 | 99.60% | 100.00% | Same observed benefit in this trace |
+| Popularity shift | 4 | 71.80% | 74.45% | Admission policy improves hit rate in this small-capacity case |
+| Popularity shift | 8 | 99.60% | 99.08% | Admission warm-up slightly hurts when the hot set fits |
+
+At Zipf capacity 8, median backing-store lookups decreased from 1,802 to 1,466. At popularity-shift capacity 8, they increased from 16 to 37, illustrating that admission control is workload-dependent. In these local runs, second-access bookkeeping also added elapsed-time overhead; timing is environment-sensitive and should not be interpreted as a universal performance result. See `results/median_elapsed_ms.png` and the CSV for the recorded measurements.
+
+### Complexity and trade-offs
+
+- The existing LRU cache retains average O(1) lookup, promotion and eviction.
+- Admission bookkeeping uses a dictionary and FIFO expiry queue; each observation is added and expired once, with amortized O(1) bookkeeping per request. The queue and live observation map retain at most `window_size + 1` live observations.
+- The policy can reduce cache pollution from one-time scans but may add CPU and memory overhead, delay useful cache admission, or hurt rapidly shifting workloads.
+- The backing store is an in-memory dictionary and the experiment is single-threaded. This is an educational prototype, not a deployed or persistent URL-shortening service.
+- The benchmarks use synthetic traces and local timing measurements. No production workload, statistically universal speedup, or novel invention of admission control is claimed.
+
+## Release engineering report
+
+- Preserved the original cache, store, URL shortener, CLI, dataset, demo, project configuration, original tests, and historical benchmark artifacts.
+- Added deterministic workload generators, the separate admission policy/resolver, experiment runner and CSV schema, schema-aware report generation, tests, and repository ignore rules.
+- The legacy benchmark command was executed successfully and retained its recorded logical results: 49 URLs, 5,000 operations, seed 42, and hit rates 7.48%, 12.76%, 25.58%, and 49.58% for capacities 3, 5, 10, and 20.
+- Validation for this release: see the accompanying `ENGINEERING_REPORT.md` for actual test counts, benchmark configuration, generated charts, and remaining limitations.
